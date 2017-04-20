@@ -6,7 +6,7 @@
 
   A High Dynamic Range (HDR) image contains a wider variation of intensity
   and color than is allowed by the RGB format with 1 byte per channel that we
-  have used in the previous assignment.  
+  have used in the previous assignment.
 
   To store this extra information we use single precision floating point for
   each channel.  This allows for an extremely wide range of intensity values.
@@ -53,7 +53,7 @@
   Old TV signals used to be transmitted in this way so that black & white
   televisions could display the luminance channel while color televisions would
   display all three of the channels.
-  
+
 
   Tone-mapping
   ============
@@ -89,16 +89,105 @@ void your_histogram_and_prefixsum(const float* const d_logLuminance,
                                   const size_t numCols,
                                   const size_t numBins)
 {
-  //TODO
-  /*Here are the steps you need to implement
-    1) find the minimum and maximum value in the input logLuminance channel
-       store in min_logLum and max_logLum
-    2) subtract them to find the range
-    3) generate a histogram of all the values in the logLuminance channel using
-       the formula: bin = (lum[i] - lumMin) / lumRange * numBins
-    4) Perform an exclusive scan (prefix sum) on the histogram to get
-       the cumulative distribution of luminance values (this should go in the
-       incoming d_cdf pointer which already has been allocated for you)       */
+  //TODO  Here are the steps you need to implement
+  //  1) find the minimum and maximum value in the input logLuminance channel
+  //     store in min_logLum and max_logLum
+  float* d_block_result;
+  find_min_or_max(d_logLuminance, true, numRows, numCols, &min_logLum);
+  find_min_or_max(d_logLuminance, false, numRows, numCols, &max_logLum);
 
+  //  2) subtract them to find the range
+  float range = max_logLum-minlogLum;
+
+  //  3) generate a histogram of all the values in the logLuminance channel using
+  //     the formula: bin = (lum[i] - lumMin) / lumRange * numBins
+  binning(d_logLuminance, d_cdf, min, range, numRows, numCols, numBins);
+
+  //  4) Perform an exclusive scan (prefix sum) on the histogram to get
+  //     the cumulative distribution of luminance values (this should go in the
+  //     incoming d_cdf pointer which already has been allocated for you)
+  scan(d_cdf, numBins);
+}
+
+__global__ void binning(
+  const float* const d_input,
+  float* d_output,
+  const float min,
+  const float range,
+  const size_t numRows,
+  const size_t numCols,
+  const size_t numBins
+) {
+  // boundary check
+  int x = blockIdx.x * blockDim.x + threadIdx.x;
+  int y = blockIdx.y * blockDim.y + threadIdx.y;
+  if (x >= numRows || y >= numCols) return;
+
+  int offset = x * numRows + y;
+  unsigned int bin =
+    static_cast<unsigned int>((d_input[offset] - min) / range * numBins);
+  atomicAdd(d_output + bin, 1);
+}
+
+__global__ void scan(
+  
+) {
 
 }
+
+
+// reduce per thread block
+__global__ void block_reduce(
+  const float* const d_input,
+  const bool is_min,
+  const size_t numRows,
+  const size_t numCols,
+  float* d_output) {
+    // boundary check
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+    if (x >= numRows || y >= numCols) return;
+
+    // copy to block shared memory.
+    int t_idx = threadIdx.x * blockDim.y + threadIdx.y;
+    extern __shared__ int shmem[];
+    shmem[t_idx] = d_input[x * numCols + y];
+
+    __syncthreads(); 
+
+    // now do reduction with sequential index
+    for(unsigned int s=(blockDim.x * blockDim.y)/2; s>0 && s >>=1) {
+      if (t_idx <s) {
+        if (is_min) shmem[t_idx] = min(shmem[t_idx], shmem[t_idx+s]);
+        else shmem[t_idx] = max(shmem[t_idx], shmem[t_idx+s]);
+      }
+      __syncthreads(); 
+    }
+
+    if (t_idx == 0) {
+      int blk_idx = blockIdx.x * blockDim.y + blockIdx.y;
+      d_output[blk_idx] = shmeme[0];
+    }
+  }
+
+
+void find_min_or_max(
+  const float* const d_input,
+  bool is_min,
+  const size_t numRows,
+  const size_t numCols,
+  float* d_result) {
+    int blockWidth = 32;
+    const dim3 blockSize(blockWidth, blockWidth, 1);
+    const dim3 gridSize((ceiling(float(numRows)/blockWidth), ceiling(float(numCols)/blockWidth), 1);
+
+    int block_count = gridSize.x * gridSize.y;
+    float* d_block_result;
+    checkCudaErrors(cudaMalloc(&d_block_result,   sizeof(float) * block_count));
+
+    block_reduce<<<gridSize, blockSize>>>(d_input, is_min, numRows, numCols, d_block_result);
+    cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
+
+    block_reduce<<<1, block_count>>>(d_block_result, is_min, 1, block_count, d_result);
+    cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
+  }
